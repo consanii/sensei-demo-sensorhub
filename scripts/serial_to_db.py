@@ -12,9 +12,26 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 import serial
-from influxdb import InfluxDBClient
+import configparser
+from pathlib import Path
 
+import influxdb_client
+from influxdb_client.client.write_api import SYNCHRONOUS
 
+# Load from ./config.ini if it exists
+_ini_path = Path("./config.ini")
+if _ini_path.exists():
+    _cfg = configparser.ConfigParser()
+    _cfg.read(_ini_path)
+    token = _cfg.get("influx", "token")
+    org = _cfg.get("influx", "org")
+    url = _cfg.get("influx", "url")
+    bucket = _cfg.get("influx", "bucket")
+    measurement = _cfg.get("influx", "measurement")
+else:
+    raise RuntimeError("Configuration file ./config.ini not found!")
+
+# CSV field order, as specified in the sensorhub firmware
 FIELD_ORDER: List[str] = [
     "Timestamp",
     "SCD41_CO2",
@@ -89,15 +106,14 @@ def build_point(measurement: str, values: Dict[str, float]) -> dict:
 
 def run(args: argparse.Namespace) -> None:
     """Main processing loop: read serial data and write to InfluxDB."""
-    # Initialize InfluxDB v1 client
-    logging.info("Connecting to InfluxDB at %s:%s", args.influx_host, args.influx_port)
-    client = InfluxDBClient(
-        host=args.influx_host,
-        port=args.influx_port,
-        username=args.influx_user,
-        password=args.influx_password,
-        database=args.influx_database
-    )
+    # Initialize InfluxDB v2 client
+    try:
+        logging.info("Connecting to InfluxDB at %s", url)
+        write_client = influxdb_client.InfluxDBClient(url=url, token=token, org=org)
+        write_api = write_client.write_api(write_options=SYNCHRONOUS)
+    except Exception as exc:
+        logging.error("Failed to connect to InfluxDB: %s", exc)
+        return
     
     logging.info("Opening serial port %s @ %d baud", args.serial_port, args.baudrate)
     
@@ -128,7 +144,8 @@ def run(args: argparse.Namespace) -> None:
                         logging.info("Found first valid CSV line, starting data collection")
                         break
                     except ValueError:
-                        logging.debug("Skipping: %s", raw[:80])  # Show first 80 chars
+                        # Log the full raw line at DEBUG so operators can inspect problems
+                        logging.debug("Skipping malformed header candidate: %s", raw)
                         continue
 
             while True:
@@ -137,22 +154,30 @@ def run(args: argparse.Namespace) -> None:
                     time.sleep(args.idle_sleep)
                     continue
 
+                # Log the full CSV line at DEBUG level for troubleshooting
+                logging.debug("CSV line: %s", raw)
+
                 try:
                     values = parse_csv_line(raw)
                 except ValueError as exc:
                     logging.warning("Discarding malformed line: %s (%s)", raw, exc)
                     continue
 
-                point = build_point(args.measurement, values)
+                point = build_point(measurement, values)
                 
                 try:
-                    client.write_points([point])
+                    # Use the InfluxDB v2 write API
+                    write_api.write(bucket=bucket, org=org, record=point)
                     logging.debug("Written point to InfluxDB")
                 except Exception as exc:
                     logging.error("Failed to write to InfluxDB: %s", exc)
                     time.sleep(args.error_backoff)
     finally:
-        client.close()
+        # Close the InfluxDB client created above
+        try:
+            write_client.close()
+        except Exception:
+            pass
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -164,14 +189,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-header", action="store_true", help="Skip the first header line")
     parser.add_argument("--idle-sleep", type=float, default=0.1, help="Sleep duration when no data is available")
     parser.add_argument("--error-backoff", type=float, default=1.0, help="Delay before retrying after write failure")
-    
-    # InfluxDB v1 settings
-    parser.add_argument("--influx-host", default="localhost", help="InfluxDB host")
-    parser.add_argument("--influx-port", type=int, default=8086, help="InfluxDB port")
-    parser.add_argument("--influx-user", default="", help="InfluxDB username")
-    parser.add_argument("--influx-password", default="", help="InfluxDB password")
-    parser.add_argument("--influx-database", default="sensor_data", help="InfluxDB database name")
-    parser.add_argument("--measurement", default="environment", help="InfluxDB measurement name")
     
     parser.add_argument(
         "--log-level",
@@ -191,6 +208,9 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+
+    # Print InfluxDB config at debug level
+    logging.debug("InfluxDB config: org=%s url=%s bucket=%s", org, url, bucket)
 
     signal.signal(signal.SIGINT, _graceful_shutdown)
     signal.signal(signal.SIGTERM, _graceful_shutdown)

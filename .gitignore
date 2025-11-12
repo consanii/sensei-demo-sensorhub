@@ -39,3 +39,6 @@ src_GAP/*.png
 src_GAP/*.ppm
 
 serial_log.log
+
+# Ignore secrets
+config.ini

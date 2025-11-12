@@ -1,0 +1,24 @@
+[Unit]
+Description=System service of the serial to InfluxDB script
+After=dev-ttyACM0.device
+
+[Service]
+Type=exec
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=serial_to_db
+
+User=sensei
+WorkingDirectory=/home/sensei/sensei-demo-sensorhub
+ExecStart=/home/sensei/miniforge3/condabin/conda run --no-capture-output -n db python /home/sensei/sensei-demo-sensorhub/scripts/serial_to_db.py /dev/ttyACM0
+
+# Always restart on any exit (success or failure)
+Restart=always
+RestartSec=60
+# Unlimited restart attempts (systemd default is 5 attempts in 10 seconds)
+StartLimitBurst=0
+
+[Install]
+WantedBy=multi-user.target

@@ -18,8 +18,8 @@ from pathlib import Path
 import influxdb_client
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-# Load from ./config.ini if it exists
-_ini_path = Path("./config.ini")
+# Load ./config.ini using global path
+_ini_path = Path(__file__).resolve().parent / "config.ini"
 if _ini_path.exists():
     _cfg = configparser.ConfigParser()
     _cfg.read(_ini_path)
@@ -121,13 +121,13 @@ def run(args: argparse.Namespace) -> None:
         # Open serial port
         try:
             ser = serial.Serial(
-            port=args.serial_port,
-            baudrate=args.baudrate,
-            timeout=args.serial_timeout,
+                port=args.serial_port,
+                baudrate=args.baudrate,
+                timeout=args.serial_timeout,
             )
         except (serial.SerialException, OSError) as exc:
             logging.error("Unable to open serial port! %s", exc)
-            return
+            sys.exit(1)
         # Flush any existing input
         ser.reset_input_buffer()
 
@@ -148,35 +148,42 @@ def run(args: argparse.Namespace) -> None:
                         logging.debug("Skipping malformed header candidate: %s", raw)
                         continue
 
+
+            # ------------- MAIN LOOP -------------
             while True:
-                raw = ser.readline().decode(errors="ignore").strip()
+                # Read a line from serial port
+                try:
+                    raw = ser.readline().decode(errors="ignore").strip()
+                except (serial.SerialException, OSError) as exc:
+                    logging.error("Serial port error: %s", exc)
+                    sys.exit(1)
                 if not raw:
                     time.sleep(args.idle_sleep)
                     continue
 
-                # Log the full CSV line at DEBUG level for troubleshooting
+                # [DEBUG] Log the full CSV line for troubleshooting
                 logging.debug("CSV line: %s", raw)
 
+                # Parse CSV line
                 try:
                     values = parse_csv_line(raw)
                 except ValueError as exc:
-                    logging.warning("Discarding malformed line: %s (%s)", raw, exc)
+                    logging.warning("Discarding malformed line: %s", exc)
                     continue
-
+                # Build InfluxDB point
                 point = build_point(measurement, values)
-                
+                # Write point to InfluxDB
                 try:
-                    # Use the InfluxDB v2 write API
                     write_api.write(bucket=bucket, org=org, record=point)
                     logging.debug("Written point to InfluxDB")
                 except Exception as exc:
                     logging.error("Failed to write to InfluxDB: %s", exc)
-                    time.sleep(args.error_backoff)
     finally:
         # Close the InfluxDB client created above
         try:
             write_client.close()
         except Exception:
+            logging.error("Failed to close InfluxDB client on exit")
             pass
 
 
@@ -188,7 +195,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--serial-timeout", type=float, default=1.0, help="Serial read timeout in seconds")
     parser.add_argument("--skip-header", action="store_true", help="Skip the first header line")
     parser.add_argument("--idle-sleep", type=float, default=0.1, help="Sleep duration when no data is available")
-    parser.add_argument("--error-backoff", type=float, default=1.0, help="Delay before retrying after write failure")
     
     parser.add_argument(
         "--log-level",
@@ -199,8 +205,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+
+
+# --------------- Main ---------------
 def main() -> None:
-    """Entry point."""
     parser = build_arg_parser()
     args = parser.parse_args()
     logging.basicConfig(
@@ -209,15 +217,15 @@ def main() -> None:
         stream=sys.stderr,
     )
 
-    # Print InfluxDB config at debug level
-    logging.debug("InfluxDB config: org=%s url=%s bucket=%s", org, url, bucket)
-
     signal.signal(signal.SIGINT, _graceful_shutdown)
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
+    # Print InfluxDB config at debug level
+    logging.debug("InfluxDB config: org=%s url=%s bucket=%s", org, url, bucket)
+
     try:
         run(args)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt: # Redundant, but safe
         logging.info("Interrupted, exiting")
 
 
